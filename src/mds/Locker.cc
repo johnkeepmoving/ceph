@@ -113,6 +113,11 @@ void Locker::dispatch(Message *m)
   }
 }
 
+void Locker::tick()
+{
+	scatter_tick();
+	caps_tick();
+}
 
 /*
  * locks vs rejoin
@@ -1933,8 +1938,13 @@ bool Locker::issue_caps(CInode *in, Capability *only_cap)
 		<< " new pending " << ccap_string(after) << " was " << ccap_string(before) 
 		<< dendl;
 
-	MClientCaps *m = new MClientCaps((before & ~after) ? CEPH_CAP_OP_REVOKE:CEPH_CAP_OP_GRANT,
-					 in->ino(),
+	int op = (before & ~after) ? CEPH_CAP_OP_REVOKE : CEPH_CAP_OP_GRANT;
+	if (op == CEPH_CAP_OP_REVOKE) {
+		revoking_caps.push_back(&cap->item_revoking_caps);
+		cap->set_last_revoke_stamp(ceph_clock_now(g_ceph_context));
+	}
+
+	MClientCaps *m = new MClientCaps(op, in->ino(),
 					 in->find_snaprealm()->inode->ino(),
 					 cap->get_cap_id(), cap->get_last_seq(),
 					 after, wanted, 0,
@@ -3199,6 +3209,25 @@ void Locker::remove_client_cap(CInode *in, client_t client)
   try_eval(in, CEPH_CAP_LOCKS);
 }
 
+void Locker::caps_tick()
+{
+  utime_t now = ceph_clock_now(g_ceph_context);
+  utime_t cutoff = now;
+  cutoff -= g_conf->mds_revoke_cap_timeout;
+
+  for (xlist<Capability*>::iterator p = revoking_caps.begin(); !p.end(); ++p) {
+    Capability *cap = *p;
+    if (cap->get_last_revoke_stamp() >= cutoff)
+      break;
+
+    utime_t age = now - cap->get_last_revoke_stamp();
+    stringstream ss;
+    ss << "client." << cap->get_client() << " isn't responding to MClientCaps(revoke), ino "
+       << cap->get_inode()->ino() << " pending " << ccap_string(cap->pending())
+       << " issued " << ccap_string(cap->issued()) << ", sent " << age << " seconds ago\n";
+    mds->clog->warn() << ss.str();
+  }
+}
 
 void Locker::handle_client_lease(MClientLease *m)
 {
