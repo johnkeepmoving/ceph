@@ -6276,53 +6276,37 @@ int ReplicatedPG::start_flush(
    * the second delete, the object would appear in the base pool to
    * have existed.
    */
-  SnapContext dsnapc;
-  dsnapc.seq = 0;
-  SnapContext snapc;
-  if (soid.snap == CEPH_NOSNAP) {
-    snapc.seq = snapset.seq;
-    snapc.snaps = snapset.snaps;
 
-    if (!snapset.clones.empty() && snapset.clones.back() != snapset.seq) {
-      dsnapc.seq = snapset.clones.back();
-      vector<snapid_t>::iterator p = snapset.snaps.begin();
-      while (p != snapset.snaps.end() && *p > dsnapc.seq)
-	++p;
-      dsnapc.snaps = vector<snapid_t>(p, snapset.snaps.end());
+  SnapContext snapc, dsnapc, dsnapc2;
+  if (snapset.seq != 0) {
+    vector<snapid_t> _s;
+    _s.push_back(snapset.seq);
+    const vector<snapid_t> &included_snaps = (soid.snap == CEPH_NOSNAP) ?
+      _s : oi.snaps;
+    snapid_t min_included_snap = included_snaps.back();
+
+    snapid_t prev_snapc = 0;
+    for (vector<snapid_t>::reverse_iterator citer = snapset.clones.rbegin();
+	 citer != snapset.clones.rend();
+	 ++citer) {
+      if (*citer < soid.snap) {
+	prev_snapc = *citer;
+	break;
+      }
     }
-  } else {
-    vector<snapid_t>::iterator citer = std::find(
-      snapset.clones.begin(),
-      snapset.clones.end(),
-      soid.snap);
-    assert(citer != snapset.clones.end());
-    snapid_t prev_snapc = (citer == snapset.clones.begin()) ?
-      snapid_t(0) : *(citer - 1);
 
-    vector<snapid_t>::iterator p = snapset.snaps.begin();
-    while (p != snapset.snaps.end() && *p >= oi.snaps.back())
-      ++p;
-    snapc.snaps = vector<snapid_t>(p, snapset.snaps.end());
-
-    vector<snapid_t>::iterator dnewest = p;
-
-    // we may need to send a delete first
-    if (prev_snapc + 1 < *dnewest) {
-      while (p != snapset.snaps.end() && *p > prev_snapc)
-	++p;
-      dsnapc.snaps = vector<snapid_t>(p, snapset.snaps.end());
-
-      dsnapc.seq = prev_snapc;
-      snapc.seq = oi.snaps.back() - 1;
-    } else {
-      snapc.seq = prev_snapc;
-    }
+    snapc = snapset.get_ssc_as_of(min_included_snap - 1);
+    dsnapc = snapset.get_ssc_as_of(prev_snapc);
+    snapid_t first_snap_after_prev_snapc =
+      snapset.get_first_snap_after(prev_snapc, min_included_snap);
+    dsnapc2 = snapset.get_ssc_as_of(
+      first_snap_after_prev_snapc - 1);
   }
 
   object_locator_t base_oloc(soid);
   base_oloc.pool = pool.info.tier_of;
 
-  if (dsnapc.seq > 0) {
+  if (dsnapc.seq < snapc.seq) {
     ObjectOperation o;
     o.remove();
     osd->objecter_lock.Lock();
@@ -6338,40 +6322,24 @@ int ReplicatedPG::start_flush(
       NULL,
       NULL /* no callback, we'll rely on the ordering w.r.t the next op */);
     osd->objecter_lock.Unlock();
+  }
 
-    // do we need to send the second delete?
-    SnapContext dsnapc2;
-    vector<snapid_t>::reverse_iterator rp = snapset.snaps.rbegin();
-
-    // advance rp to the smallest snap not contained by the last flushed clone
-    while (rp != snapset.snaps.rend() && *rp <= dsnapc.seq)
-      ++rp;
-
-    // set dnsnapc2.seq to be the snap prior to that snap (the object did not
-    // exist at *rq, so it must have been deleted prior to that).
-    dsnapc2.seq = (rp == snapset.snaps.rend()) ? snapset.seq : *rp;
-    if (dsnapc2.seq > 0)
-      dsnapc2.seq.val -= 1;
-
-    if (dsnapc2.seq != dsnapc.seq) {
-      dsnapc2.snaps = dsnapc.snaps;
-
-      ObjectOperation o2;
-      o2.remove();
-      osd->objecter_lock.Lock();
-      osd->objecter->mutate(
-	soid.oid,
-	base_oloc,
-	o2,
-	dsnapc2,
-	oi.mtime,
-	(CEPH_OSD_FLAG_IGNORE_OVERLAY |
-	 CEPH_OSD_FLAG_ORDERSNAP |
-	 CEPH_OSD_FLAG_ENFORCE_SNAPC),
-	NULL,
-	NULL /* no callback, we'll rely on the ordering w.r.t the next op */);
-      osd->objecter_lock.Unlock();
-    }
+  if (dsnapc2.seq < snapc.seq) {
+    ObjectOperation o;
+    o.remove();
+    osd->objecter_lock.Lock();
+    osd->objecter->mutate(
+      soid.oid,
+      base_oloc,
+      o,
+      dsnapc2,
+      oi.mtime,
+      (CEPH_OSD_FLAG_IGNORE_OVERLAY |
+       CEPH_OSD_FLAG_ORDERSNAP |
+       CEPH_OSD_FLAG_ENFORCE_SNAPC),
+      NULL,
+      NULL /* no callback, we'll rely on the ordering w.r.t the next op */);
+    osd->objecter_lock.Unlock();
   }
 
   FlushOpRef fop(new FlushOp);
@@ -10851,6 +10819,9 @@ void ReplicatedPG::hit_set_create()
     }
     if (p->target_size < static_cast<uint64_t>(g_conf->osd_hit_set_min_size))
       p->target_size = g_conf->osd_hit_set_min_size;
+
+    if (p->target_size > static_cast<uint64_t>(g_conf->osd_hit_set_max_size))
+      p->target_size = g_conf->osd_hit_set_max_size;
 
     p->seed = now.sec();
 

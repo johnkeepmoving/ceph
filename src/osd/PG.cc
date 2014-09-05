@@ -1474,12 +1474,6 @@ void PG::activate(ObjectStore::Transaction& t,
   } else {
     dout(10) << "activate - not complete, " << missing << dendl;
     pg_log.activate_not_complete(info);
-    if (is_primary()) {
-      dout(10) << "activate - starting recovery" << dendl;
-      osd->queue_for_recovery(this);
-      if (have_unfound())
-	discover_all_missing(query_map);
-    }
   }
     
   log_weirdness();
@@ -1644,6 +1638,10 @@ void PG::activate(ObjectStore::Transaction& t,
       build_might_have_unfound();
 
       state_set(PG_STATE_DEGRADED);
+      dout(10) << "activate - starting recovery" << dendl;
+      osd->queue_for_recovery(this);
+      if (have_unfound())
+	discover_all_missing(query_map);
     }
 
     // degraded?
@@ -2418,6 +2416,11 @@ void PG::init(
     dout(10) << __func__ << ": Setting backfill" << dendl;
     info.last_backfill = hobject_t();
     info.last_complete = info.last_update;
+
+    PGLogEntryHandler rollbacker;
+    pg_log_t empty;
+    pg_log.claim_log_and_clear_rollback_info(empty, &rollbacker);
+    rollbacker.apply(this, t);
     pg_log.mark_log_for_rewrite();
   }
 
