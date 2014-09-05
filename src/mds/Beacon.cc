@@ -274,9 +274,9 @@ void Beacon::notify_health(MDS const *mds)
         << ": " << session->recalled_at << " " << session->recall_release_count
         << "/" << session->recall_count << dendl;
       if (session->recalled_at < cutoff) {
-        dout(20) << "  exceeded timeout" << session->recalled_at << " vs. " << cutoff << dendl;
+        dout(20) << "  exceeded timeout " << session->recalled_at << " vs. " << cutoff << dendl;
         std::ostringstream oss;
-        oss << "Client " << session->info.inst.name.num() << "failing to relinquish capabilities";
+        oss << "Client " << session->info.inst.name.num() << " failing to relinquish capabilities";
         MDSHealthMetric m(MDS_HEALTH_CLIENT_RECALL, HEALTH_WARN, oss.str());
         m.metadata["client_id"] = session->info.inst.name.num();
         health.metrics.push_back(m);
