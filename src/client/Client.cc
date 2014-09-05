@@ -4183,7 +4183,12 @@ void Client::flush_cap_releases()
        p != mds_sessions.end();
        ++p) {
     if (p->second->release && mdsmap->is_clientreplay_or_active_or_stopping(p->first)) {
-      p->second->con->send_message(p->second->release);
+      if (g_conf->client_inject_release_failure) {
+        ldout(cct, 20) << " injecting failure to send cap release message " << p->second << dendl;
+        p->second->release->put();
+      } else {
+        p->second->con->send_message(p->second->release);
+      }
       p->second->release = 0;
     }
   }
